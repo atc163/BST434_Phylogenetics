@@ -1,0 +1,302 @@
+---
+title: "Phylogenetic Trees With Phangorn"
+output: html_document
+date: "2024-04-04"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+## Installing Phangorn
+
+```{r}
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+
+#BiocManager::install("phangorn")
+#install.packages("ape")
+#install.packages("seqinr")
+```
+
+## Packages
+
+```{r}
+library(ape)
+library(phangorn)
+library(seqinr)
+```
+
+```{r}
+# Reading in an alignment
+
+fdir <- system.file("extdata/trees", package = "phangorn")
+primates <- read.phyDat(file.path(fdir, "primates.dna"), # Example dataset included in phangorn
+                        format = "interleaved")
+
+# Viewing the taxa names
+primates_sum <- summary(primates)
+# Sequence of first first primate
+mouse_sequence <- primates['Mouse']
+```
+
+## Builing a Tree With Distance Based Method
+
+First, we can build a tree using distance based methods. In order to use the function dist.dna (which is used to calculate distances for substitution models) from the ape package, we first need to transform the data into class DNAbin.
+
+UPGMA (unweighted pair group method with arithmetic mean) is a bottom up approach to hierarchical clustering for tree construction. It assumes a molecular clock, or constant rate of evolution. In other words, the distances from the root to every branch tip are equal. It iteratively joins (clusters) the two most similar sequences based on a pairwise distance matrix of each taxa. In Big-O notation (a measure of worst case scenario with regards to performance or complexity of an algorithm), it has a time complexity of O(n^3).
+
+Neighbor joining is another bottom up approach clustering method for constructing phylogentic trees by using a distance matrix that specifies distance between each pair of taxa. It starts off in an unresolved star shape format. It then searches for taxa that are nearest to one another, makes a new node that joins them together, and then connects them to a central node. Finally, it calculates the distance from each of the taxa in the pair to the new node, and then the distance from each of the taxa outside of this pair to the new node (the distance matrix is appropriately updated). The algorithm repeats until the tree is resolved. This algorithm has a time complexity of O(n^3). 
+
+```{r}
+dm  <- dist.ml(primates) # Distance matrix
+treeUPGMA  <- upgma(dm) # Rooted tree with UPMGA
+treeNJ  <- NJ(dm) # Unrooted tree with Neighbor Joining
+plot(treeUPGMA, main="UPGMA")
+plot(treeNJ, "unrooted", main="NJ")
+```
+### Bootstrap
+
+Let's estimate the reliability of the created phylogenetic trees. To implement the bootstrap, we first need to write a function that computes a tree from alignment, and then give the function to the bootstrap.phyDat function.
+
+```{r}
+fun1 <- function(x) upgma(dist.ml(x))
+fun2 <- function(x) NJ(dist.ml(x))
+bs_upgma <- bootstrap.phyDat(primates,  fun1) # Bootstrap on UPGMA
+bs_NJ <- bootstrap.phyDat(primates, fun2) # Bootstrap on NJ
+plotBS(treeUPGMA, bs_upgma, main="UPGMA") # Plotting the tree with the bootstrap values
+plotBS(treeNJ, bs_NJ, "unrooted", main="NJ")
+```
+
+The unrooted tree doesn't display the bootstrap scores that well. 
+
+## Parsimony
+
+The parsimony function returns the parsimony score, which is the minimum number of changes necessary to describe the data for a given tree. We can also compare parsimony scores for the two trees created above.
+
+Parsimony is a method of evaluating phylogenetic trees, based on the idea that the simplest scientific explanation is the correct one, or more specifically, the best tree is the one that requires the fewest evolutionary changes. The parsimony score quantifies how well a particular tree fits this idea, and a lower parsimony score is better than a higher one.
+
+```{r}
+paste("UPGMA parsimony score:", parsimony(treeUPGMA, primates))
+paste("NJ parsimony score:", parsimony(treeNJ, primates))
+```
+
+A good function to infer phylogenies using the maximum parsimony method is with pratchet. This helps with enhancing the search for the most parsimonious tree by helping to avoid local optima (a tree that would appear best only within a certain search area) and to hopefully find better trees rather than only using neirghest neighboring interchanges and subtree pruning and regrafting alone. 
+
+The process is:
+1.) Create a bootsrtrap dataset D_b from the original dataset
+2.) Take the current best tree (one with lowest parsimony score) and perform tree rearrangments on the D_b and save as T_b
+3.) Take T_b and perform tree rearrangements on original dataset and if the process results in a tree with a lower parsimony score than the current best tree, replace it
+4.) Repeat steps 1-3 for either a fixed number of iterations (minit) or until or until no improvements are made for a specified number of iterations (default iterations set to k = 10)
+
+```{r}
+# Setting trace = 0 will not display any progress as it runs
+treeRatchet  <- pratchet(primates, trace = 0, minit=100)
+parsimony(treeRatchet, primates)
+```
+
+From before, the trees returned carried no branch lengths assigned to them. Lets change that!
+
+```{r}
+treeRatchet  <- acctran(treeRatchet, primates) # Assigning edge weights (lengths) using accelerated transformation
+treeRatchet  <- di2multi(treeRatchet) # Removes short internal edges, where length is below a tolerance level, tol(default = 1e-08)
+
+if(inherits(treeRatchet, "multiPhylo")){ # If treeRatchet contains multiple phylogenetic trees...
+  treeRatchet <- unique(treeRatchet)  # Eliminate duplicate ones
+}
+
+# Plotting tree with bootstrap support values
+plotBS(midpoint(treeRatchet), type="phylogram")
+add.scale.bar()
+```
+
+### Branch and Bound
+
+For smaller datasets with just a few species, you can find the most parsimonious trees using a branch and bound algorithm. It's best to use if there are fewer than 10 taxa in the dataset (since any more would take too long).
+
+```{r}
+ (trees <- bab(primates[1:10,])) # Taking subset of primates dataset (10 rows)
+```
+
+## Maximum Likelihood
+
+Let's try to find the best fitting model using a function called modelTest to compare different nucleotide models. As we previously discussed, maximum likelihood is a statistical method for choosing the phylogenetic tree that has the highest probability of being observed. 
+
+```{r}
+# mt <- modelTest(primates) # Can run all models available
+# Can also choose a select few models
+mt <- modelTest(primates, model = c("JC", "F81", "HKY", "SYM", "GTR"), control = pml.control(trace = 0))
+mt
+```
+
+It makes sense that the JC model would rank the worst, while one of the GTR models would rank best (which was chosen for the phylogenetics nomenclature paper). 
+
+logLik: logarithmic likelihood. A higher value indicates a better fit
+
+AIC: akaike information criterion. Estimates the quality of each model relative to the other models.Takes into account logarithmic likelihood and model complexity (number of parameters). Lower values indicates a better model
+
+AICw: akaike information criterion weight. Higher values indicate a better model.
+
+AICc: corrected akaike information criterion. Correction for smaller sample sizes. Converges to AIC as number of observations go up.
+
+AICcw: corrected weight akaike information criterion
+
+BIC: bayesian information criterion. Lower values are better. 
+
+
+```{r}
+lowest_AIC <- min(mt$AIC) # Getting model with lowest AIC value
+lowest_AIC_index <- which.min(mt$AIC)
+lowest_AIC_row <- mt[lowest_AIC_index, ]
+lowest_AIC_row
+```
+
+You can save specific results so as not to run the above function each time.
+
+```{r}
+fit <- as.pml(mt, "HKY+G(4)+I")
+fit <- as.pml(mt, "BIC")
+fit
+```
+
+
+## Conducting a ML Tree
+
+We can simplify the workflow by giving modelTest to the function pml_bb, while using BIC to optimize its parameters.
+
+```{r}
+fit_mt <- pml_bb(mt, control = pml.control(trace = 0))
+fit_mt
+```
+
+We can also use pml_bb with a defined model to infer a phylogenetic tree.
+
+```{r}
+fitGTR <-  pml_bb(primates, model="GTR", control = pml.control(trace = 0))
+fitGTR
+```
+
+### Bootstrap
+
+We can conduct standard bootstrapping with the function bootstrap.pml.
+
+```{r}
+bs <- bootstrap.pml(fit_mt, bs = 100, optNni=TRUE, control = pml.control(trace = 0))
+# optNni=TRUE indicates that nearest neighbor interchange optimization should be performed
+```
+
+And then plot the tree with the bootstrap support values and compare standard bootstrap values to the untrafast bootstrap values.
+
+```{r}
+plotBS(midpoint(fit_mt$tree), p = .5, type="p", digits=2, main="Ultrafast bootstrap")
+
+plotBS(midpoint(fit_mt$tree), bs, p = 50, type="p", main="Standard bootstrap")
+
+plotBS(midpoint(fit_mt$tree), bs, p = 50, type="p", digits=0, method = "TBE", main="Transfer bootstrap")
+```
+
+### Molecular Dating With a Strict Clock For Ultrametric and Tipdated Phlogenies
+
+By assuming a molecular clock, phylogenies can be used to infer divergence times. 
+
+```{r}
+fit_strict <- pml_bb(primates, model="HKY+G(4)", method="ultrametric",
+                     rearrangement="NNI", control = pml.control(trace = 0))
+plot(fit_strict)
+```
+
+Phangorn allows us to estimate tipdated phylogenies (estimating timing of divergence events). 
+
+```{r}
+fdir <- system.file("extdata/trees", package = "phangorn")
+tmp <- read.csv(file.path(fdir,"H3N2_NA_20.csv"))
+# Using H3N2 virus dataset from treetime
+H3N2 <- read.phyDat(file.path(fdir,"H3N2_NA_20.fasta"), format="fasta")
+dates <- setNames(tmp$numdate_given, tmp$name)
+head(dates)
+```
+
+```{r}
+fit_td <- pml_bb(H3N2, model="HKY+I", method="tipdated", tip.dates=dates, 
+               rearrangement="NNI", control = pml.control(trace = 0))
+fit_td
+```
+
+Plotting the tree with a timescale.
+
+```{r}
+plot(fit_td, align.tip.label=TRUE)
+```
+
+### Using Covid Variants Sequences
+
+We can follow this process again with a dataset containing the sequences for the Wuhan virus, and the Alpha, Delta, Gamma and Omicron variants.
+
+```{r}
+# Please make sure to change your file path
+filepath <- "/Users/alejandrocruz/Desktop/Computational Biology/Lab06/SARS-CoV-2.fasta"
+covid_sequences <- read.phyDat(filepath, format = "fasta")
+```
+
+Distance based methods.
+
+```{r}
+dm2  <- dist.ml(covid_sequences)
+treeUPGMA2  <- upgma(dm2)
+treeNJ2  <- NJ(dm2)
+plot(treeUPGMA2, main="UPGMA")
+plot(treeNJ2, "unrooted", main="NJ")
+```
+
+## Bootstrap
+
+```{r}
+fun2 <- function(x) upgma(dist.ml(x))
+bs_upgma2 <- bootstrap.phyDat(covid_sequences,  fun2)
+plotBS(treeUPGMA2, bs_upgma2, main="UPGMA")
+```
+
+## Parsimony
+
+```{r}
+parsimony(treeUPGMA2, covid_sequences)
+```
+
+```{r}
+parsimony(treeNJ2, covid_sequences)
+```
+
+
+```{r}
+treeRatchet2  <- pratchet(covid_sequences, trace = 0, minit=100)
+parsimony(treeRatchet2, covid_sequences)
+```
+
+```{r}
+treeRatchet2  <- acctran(treeRatchet2, covid_sequences)
+treeRatchet2  <- di2multi(treeRatchet2)
+
+if(inherits(treeRatchet2, "multiPhylo")){
+  treeRatchet2 <- unique(treeRatchet2)
+}
+
+plotBS(midpoint(treeRatchet2), type="phylogram")
+add.scale.bar()
+```
+
+### Maximum Likelihood
+
+```{r}
+mt2 <- modelTest(covid_sequences, model=c("JC", "F81", "K80", "HKY", "SYM", "GTR"), 
+                control = pml.control(trace = 0))
+mt2
+```
+
+```{r}
+fit_mt2 <- pml_bb(mt2, control = pml.control(trace = 0)) # Taking best model according to BIC
+fit_mt2
+```
+
+And so forth...
+
